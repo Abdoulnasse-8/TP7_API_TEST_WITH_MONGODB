@@ -1,10 +1,12 @@
 const express = require("express");
+const { ObjectId } = require("mongodb");
 
 const { getClient } = require("../lib/mongoClient");
 const { loadBooksFromFile } = require("../lib/booksLoader");
 
 const importRouter = express.Router();
 
+// 🔒 Validation
 function assertNonEmptyString(value, fieldName) {
   if (typeof value !== "string" || !value.trim()) {
     const err = new Error(`Champ '${fieldName}' invalide`);
@@ -13,12 +15,38 @@ function assertNonEmptyString(value, fieldName) {
   }
 }
 
+// 🔄 Stratégie
 function parseStrategy(value) {
   const v = typeof value === "string" ? value.toLowerCase().trim() : "";
   if (v === "reset" || v === "upsert") return v;
   return "reset";
 }
 
+// 🧠 Transformation des documents (IMPORTANT)
+function transformDocs(rawDocs) {
+  return rawDocs.map((doc) => {
+    const newDoc = { ...doc };
+
+    if (newDoc._id) {
+      // Cas Mongo export { $oid: ... }
+      if (typeof newDoc._id === "object" && newDoc._id.$oid) {
+        newDoc._id = new ObjectId(newDoc._id.$oid);
+      }
+      // Cas string
+      else if (typeof newDoc._id === "string") {
+        try {
+          newDoc._id = new ObjectId(newDoc._id);
+        } catch {
+          // garder tel quel si invalide
+        }
+      }
+    }
+
+    return newDoc;
+  });
+}
+
+// 🚀 Route d'import
 importRouter.post("/books", async (req, res, next) => {
   try {
     const dbName = (req.body?.dbName || process.env.MONGODB_DB || "tp7").trim();
@@ -29,30 +57,34 @@ importRouter.post("/books", async (req, res, next) => {
 
     const strategy = parseStrategy(req.body?.strategy);
 
-    const docs = loadBooksFromFile();
-    if (!docs.length) {
+    // 📂 Chargement + transformation
+    const rawDocs = loadBooksFromFile();
+    if (!rawDocs.length) {
       const err = new Error("Aucun document trouvé dans books.json");
       err.status = 400;
       throw err;
     }
 
+    const docs = transformDocs(rawDocs);
+
     const client = await getClient();
     const collection = client.db(dbName).collection(collectionName);
 
+    // 🔥 RESET
     if (strategy === "reset") {
-      // Nettoyage optionnel pour éviter les duplicats _id
       await collection.drop().catch(() => undefined);
+
       const result = await collection.insertMany(docs);
-      res.json({
+
+      return res.json({
         dbName,
         collectionName,
         strategy,
         insertedCount: result.insertedCount ?? docs.length,
       });
-      return;
     }
 
-    // Upsert par _id (si _id existe déjà, on met à jour)
+    // 🔁 UPSERT
     const operations = docs.map((doc) => ({
       replaceOne: {
         filter: { _id: doc._id },
@@ -62,6 +94,7 @@ importRouter.post("/books", async (req, res, next) => {
     }));
 
     const result = await collection.bulkWrite(operations, { ordered: false });
+
     res.json({
       dbName,
       collectionName,
@@ -76,4 +109,3 @@ importRouter.post("/books", async (req, res, next) => {
 });
 
 module.exports = { importRouter };
-
